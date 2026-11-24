@@ -315,8 +315,76 @@ async function main() {
     const escSugg = sugg2.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     check('suggested name stored exactly', new RegExp('^' + escSugg + '(_\\d+)?\\.jpg$').test(storedName), storedName + ' vs ' + sugg2);
     await page.close();
+
+    // ---- Tags: chips on the Add sheet, toggling, saved exactly as chosen
+    page = await openTab(ctx);
+    const tagData = JSON.parse(await page.getAttribute('form.qp-add', 'data-tags'));
+    check('form has tag data', Array.isArray(tagData) && tagData.length > 0);
+    await page.setInputFiles('form.qp-add input[type=file]', path.join(FX, 'small.jpg'));
+    await page.waitForSelector('.qp-sheet');
+    check('Tags block labelled Tags', (await page.locator('.qp-sheet .qp-tags-label').innerText()) === 'Tags');
+    const chips = page.locator('.qp-sheet button.qp-tag');
+    check('one chip per tag', (await chips.count()) === tagData.length, (await chips.count()) + ' vs ' + tagData.length);
+    check('chips are type=button', (await page.locator('.qp-sheet button.qp-tag:not([type=button])').count()) === 0);
+    check('no chip preselected', (await page.locator('.qp-sheet button.qp-tag[aria-pressed=true]').count()) === 0);
+    check('chip order follows data', JSON.stringify(await chips.allInnerTexts()) === JSON.stringify(tagData.map((t) => t.name)));
+    const chipH = await page.evaluate(() => Array.from(document.querySelectorAll('.qp-sheet .qp-tag')).map((e) => e.getBoundingClientRect().height));
+    check('chips >= 44 px tall', chipH.length > 0 && chipH.every((h) => h >= 44), chipH.join(','));
+    const prod = page.locator('.qp-sheet button.qp-tag', { hasText: /^Production$/ });
+    const net = page.locator('.qp-sheet button.qp-tag', { hasText: /^Network$/ });
+    const bg0 = await prod.evaluate((e) => getComputedStyle(e).backgroundColor + '|' + getComputedStyle(e).borderTopWidth);
+    await prod.click();
+    await net.click();
+    await net.click();
+    await net.click();
+    check('toggle selects', (await prod.getAttribute('aria-pressed')) === 'true' && (await net.getAttribute('aria-pressed')) === 'true');
+    const bg1 = await prod.evaluate((e) => getComputedStyle(e).backgroundColor + '|' + getComputedStyle(e).borderTopWidth);
+    check('selected state is visible', bg0 !== bg1, bg0 + ' vs ' + bg1);
+    await net.click();
+    check('toggle deselects', (await net.getAttribute('aria-pressed')) === 'false');
+    await net.click();
+    const tagBefore = newFiles().length;
+    await page.fill('.qp-sheet .qp-sheet-name', 'e2e-tags');
+    await page.click('.qp-sheet .qp-save');
+    await page.waitForSelector('text=Photo added');
+    ids = newFiles();
+    check('tagged photo added', ids.length === tagBefore + 1, ids.join(','));
+    const wantTags = tagData.filter((t) => t.name === 'Production' || t.name === 'Network').map((t) => t.id).sort((a, b) => a - b).join(',');
+    const gotTags = sql("SELECT COALESCE(GROUP_CONCAT(tag_id ORDER BY tag_id),'') FROM TagStorage WHERE entity_realm='file' AND entity_id=" + ids[ids.length - 1]);
+    check('saved file has exactly the chosen tags', gotTags === wantTags && wantTags.split(',').length === 2, gotTags + ' vs ' + wantTags);
+    check('no console errors (tags)', page.errors.length === 0, page.errors.join('|'));
+    await page.close();
+
+    // ---- New card shows the chosen tags read-only
+    page = await openTab(ctx);
+    const tcard = page.locator('.qp-photo', { has: page.locator('.qp-name', { hasText: /^e2e-tags/ }) }).first();
+    const cardTagNames = await tcard.locator('.qp-card-tags span.qp-card-tag').allInnerTexts();
+    check('new card shows chosen tag chips', JSON.stringify(cardTagNames) === JSON.stringify(['Network', 'Production']), cardTagNames.join(','));
+    check('card chips are read-only spans', (await tcard.locator('.qp-card-tags button, .qp-card-tags a').count()) === 0);
+    await page.close();
+
+    // ---- Untouched chips: no tags stored
+    page = await openTab(ctx);
+    await page.setInputFiles('form.qp-add input[type=file]', path.join(FX, 'small.jpg'));
+    await page.waitForSelector('.qp-sheet');
+    await page.fill('.qp-sheet .qp-sheet-name', 'e2e-notags');
+    await page.click('.qp-sheet .qp-save');
+    await page.waitForSelector('text=Photo added');
+    ids = newFiles();
+    check('no tags stored when none chosen', sql("SELECT COUNT(*) FROM TagStorage WHERE entity_realm='file' AND entity_id=" + ids[ids.length - 1]) === '0');
+    await page.close();
+
+    // ---- Retake sheet has no Tags block
+    page = await openTab(ctx);
+    const rform = page.locator('form.qp-replace').first();
+    await rform.locator('input[type=file]').setInputFiles(path.join(FX, 'small.jpg'));
+    await page.waitForSelector('.qp-sheet');
+    check('retake sheet has no Tags block', (await page.locator('.qp-sheet .qp-tags').count()) === 0 && (await page.locator('.qp-sheet .qp-tag').count()) === 0);
+    await page.click('.qp-sheet .qp-cancel');
+    await page.close();
   } finally {
     await browser.close();
+    sql("DELETE FROM TagStorage WHERE entity_realm='file' AND entity_id>" + baseline);
     sql('DELETE FROM FileLink WHERE file_id>' + baseline);
     sql('DELETE FROM File WHERE id>' + baseline);
     const left = sql('SELECT COUNT(*) FROM File WHERE id>' + baseline);

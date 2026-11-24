@@ -58,6 +58,8 @@ To remove the plugin, click **Uninstall** in the same place.
 
 ## Usage
 
+Each photo card also shows the file's own tags (not inherited parent tags) as small read-only chips.
+
 1. Open the entity (rack, object, ...) on the phone and go to the **Photos** tab.
 2. **Add photo**: take a picture or pick one. A confirmation sheet shows a preview and its size, and
    lets you edit the **Name** (prefilled with `<entity name>_<date>`, e.g. `A-01_2026-11-24`) and type
@@ -65,6 +67,11 @@ To remove the plugin, click **Uninstall** in the same place.
    in file names become `-`, extra spaces are collapsed, at most 100 characters, `.jpg` is added). If
    the name is already taken, `_2`, `_3`, ... is appended. If you clear the field, the file is named
    automatically from the entity name and a timestamp, e.g. `rack-12_2026-11-24_101500.jpg`.
+   **Tags**: below the name the sheet lists every assignable tag as a toggle chip (nothing is
+   preselected; tap to select or deselect, coloured like the tag in RackTables). Tags used on the most
+   files come first, then alphabetical. The chosen tags are stored on the new file exactly like the
+   core "Upload file" form does. If a tag no longer exists or is not assignable, nothing is saved
+   and an error is shown. Retake does not show or change tags. Selecting a parent tag together with its child stores only the child (core RackTables behaviour).
 3. **Retake**: on an existing photo, take a new picture. The old content is overwritten.
 4. **Shared photos**: if the image is also linked to other places, the confirmation sheet warns
    that replacing it changes it everywhere, and lists the other places you may view (others are

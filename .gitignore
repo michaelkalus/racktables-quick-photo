@@ -1,3 +1,4 @@
 .DS_Store
 tests/fixtures/out/
 node_modules/
+.superpowers/

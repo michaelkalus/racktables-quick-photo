@@ -151,6 +151,51 @@ function plugin_quickphoto_warning_text ($warning)
 	return $text . '. Replacing it changes it everywhere.';
 }
 
+// Read-only chips for the file's explicit tags (etags), sorted by name; '' if none.
+// TagTree colour comes from core as a 6 digit hex string or NULL.
+function plugin_quickphoto_card_tags_html ($file)
+{
+	if (! isset ($file['etags']) || ! is_array ($file['etags']) || ! count ($file['etags']))
+		return '';
+	$tags = array_values ($file['etags']);
+	usort ($tags, function ($a, $b) { return strcmp ((string) $a['tag'], (string) $b['tag']) ?: ((int) $a['id'] - (int) $b['id']); });
+	$html = '<div class="qp-card-tags">';
+	foreach ($tags as $tag)
+	{
+		$c = isset ($tag['color']) && is_string ($tag['color']) && strlen ($tag['color']) === 6 && ctype_xdigit ($tag['color']) ?
+			qp_tag_color (hexdec ($tag['color'])) : NULL;
+		$html .= '<span class="qp-card-tag' . ($c !== NULL ? ' qp-card-tag-colored" style="--qp-tag: ' . $c : '') . '">' .
+			qp_esc ($tag['tag']) . '</span>';
+	}
+	return $html . '</div>';
+}
+
+// Assignable tags as list of array (id, name, color) for the Add sheet: most used
+// on files first, then by name. Colour is "#rrggbb" or NULL.
+function plugin_quickphoto_tags ()
+{
+	$ret = array();
+	$q = usePreparedSelectBlade
+	(
+		'SELECT t.id, t.tag, t.color FROM TagTree t ' .
+		"LEFT JOIN (SELECT tag_id, COUNT(*) AS cnt FROM TagStorage WHERE entity_realm = 'file' GROUP BY tag_id) u ON u.tag_id = t.id " .
+		"WHERE t.is_assignable = 'yes' ORDER BY COALESCE(u.cnt, 0) DESC, t.tag, t.id"
+	);
+	while ($row = $q->fetch (PDO::FETCH_ASSOC))
+		$ret[] = array ('id' => (int) $row['id'], 'name' => (string) $row['tag'], 'color' => qp_tag_color ($row['color']));
+	return $ret;
+}
+
+// TRUE if every id is an existing assignable tag.
+function plugin_quickphoto_tags_assignable ($ids)
+{
+	if (! count ($ids))
+		return TRUE;
+	$marks = implode (', ', array_fill (0, count ($ids), '?'));
+	$n = usePreparedSelectBlade ("SELECT COUNT(*) FROM TagTree WHERE is_assignable = 'yes' AND id IN ({$marks})", $ids)->fetchColumn();
+	return (int) $n === count ($ids);
+}
+
 function plugin_quickphoto_render_tab ($entity_id)
 {
 	global $pageno, $tabno;
@@ -172,7 +217,8 @@ function plugin_quickphoto_render_tab ($entity_id)
 	echo '<noscript><p class="qp-noscript">Quick Photo needs JavaScript. Use the Files tab to upload without it.</p></noscript>';
 
 	echo '<form class="qp-add" method="post" enctype="multipart/form-data" action="' .
-		qp_esc (makeHrefProcess (array ('op' => 'addPhoto'))) . '" data-name-suggestion="' . qp_esc ($suggestion) . '">';
+		qp_esc (makeHrefProcess (array ('op' => 'addPhoto'))) . '" data-name-suggestion="' . qp_esc ($suggestion) . '" data-tags="' .
+		qp_esc ((string) json_encode (plugin_quickphoto_tags(), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)) . '">';
 	echo '<input type="hidden" name="qp_token" value="' . $tok . '">';
 	echo '<label class="qp-pick qp-button">Add photo<input type="file" accept="image/*" class="qp-file"></label>';
 	echo '<input type="text" name="comment" class="qp-comment" placeholder="Comment (optional)" maxlength="1000">';
@@ -193,6 +239,7 @@ function plugin_quickphoto_render_tab ($entity_id)
 		echo '<div class="qp-name">' . qp_esc ($file['name']) . '</div>';
 		if ($file['comment'] !== '' && $file['comment'] !== NULL)
 			echo '<div class="qp-note">' . qp_esc ($file['comment']) . '</div>';
+		echo plugin_quickphoto_card_tags_html ($file);
 		if (plugin_quickphoto_can_replace ($file))
 		{
 			$links = array_values (getFileLinks ($id));
@@ -334,6 +381,13 @@ function plugin_quickphoto_op_add ()
 		return '';
 	}
 
+	$tag_ids = qp_parse_tag_ids (isset ($_POST['taglist']) ? $_POST['taglist'] : NULL);
+	if ($tag_ids === NULL || ! plugin_quickphoto_tags_assignable ($tag_ids))
+	{
+		showError ('The selected tags are not valid. Nothing was saved.');
+		return '';
+	}
+
 	$entity = spotEntity ($realm, $entity_id);
 	$label = qp_name_label (isset ($entity['name']) ? (string) $entity['name'] : '', $realm, $entity_id);
 	$now = time();
@@ -358,6 +412,8 @@ function plugin_quickphoto_op_add ()
 				throw $e;
 			}
 			usePreparedInsertBlade ('FileLink', array ('file_id' => $file_id, 'entity_type' => $realm, 'entity_id' => $entity_id));
+			if (count ($tag_ids))
+				produceTagsForNewRecord ('file', $tag_ids, $file_id);
 			$dbxlink->commit();
 			$saved = $name;
 		}

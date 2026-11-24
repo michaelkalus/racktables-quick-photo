@@ -124,6 +124,33 @@ eq(qp_link_fingerprint([$a, $b]), qp_link_fingerprint([$b, $a]), 'fp order indep
 check(qp_link_fingerprint([$a, $b]) !== qp_link_fingerprint([$a, $b, $c]), 'fp changes on add');
 eq(strlen(qp_link_fingerprint([$a])), 64, 'fp sha256 hex');
 
+// tags: colour column (mediumint or null) to "#rrggbb"
+eq(qp_tag_color(null), null, 'tag colour NULL');
+eq(qp_tag_color(0xBFD7FF), '#bfd7ff', 'tag colour int');
+eq(qp_tag_color('12572671'), '#bfd7ff', 'tag colour numeric string');
+eq(qp_tag_color(0), '#000000', 'tag colour black');
+eq(qp_tag_color(255), '#0000ff', 'tag colour padded');
+eq(qp_tag_color(0xFFFFFF), '#ffffff', 'tag colour white');
+eq(qp_tag_color(-1), null, 'tag colour negative');
+eq(qp_tag_color(0x1000000), null, 'tag colour too big');
+eq(qp_tag_color('zz'), null, 'tag colour garbage');
+
+// tags: posted taglist -> unique positive ids, or null when anything is invalid
+eq(qp_parse_tag_ids(null), [], 'taglist missing');
+eq(qp_parse_tag_ids([]), [], 'taglist empty');
+eq(qp_parse_tag_ids(['4', '2', '4']), [4, 2], 'taglist dedupe keeps order');
+eq(qp_parse_tag_ids(['007']), [7], 'taglist leading zeros');
+eq(qp_parse_tag_ids('4'), null, 'taglist scalar');
+eq(qp_parse_tag_ids(['0']), null, 'taglist zero');
+eq(qp_parse_tag_ids(['-1']), null, 'taglist negative');
+eq(qp_parse_tag_ids(['1.5']), null, 'taglist float');
+eq(qp_parse_tag_ids(['abc']), null, 'taglist text');
+eq(qp_parse_tag_ids(['']), null, 'taglist empty element');
+eq(qp_parse_tag_ids([['1']]), null, 'taglist nested array');
+eq(qp_parse_tag_ids(['2', 'x']), null, 'taglist one bad element');
+eq(qp_parse_tag_ids(['99999999999']), null, 'taglist too long');
+eq(qp_parse_tag_ids(['1 ']), null, 'taglist trailing space');
+
 eq(qp_esc('<a href="x">\''), '&lt;a href=&quot;x&quot;&gt;&#039;', 'esc');
 
 echo "OK $n\n";

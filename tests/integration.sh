@@ -18,7 +18,7 @@ has()  { if printf '%s' "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1"; fi
 hasnt(){ if printf '%s' "$2" | grep -qF -- "$3"; then bad "$1"; else ok "$1"; fi; }
 
 PHOTO_ID=""; OLD_COMMENT=""; BASE_FILE_ID=""; TRIGGER_ON=""
-RC_HEX=""; RC_MD5=""; QP_USER=""; SHARED_LINK=""; REN_OBJ=""; REN_OLD_HEX=""
+RC_HEX=""; RC_MD5=""; QP_USER=""; SHARED_LINK=""; REN_OBJ=""; REN_OLD_HEX=""; REN_TAG=""; REN_TAG_HEX=""; CARD_FILE=""
 QJAR="$(mktemp)"
 BADNAME="$(mktemp)"
 # hex of a string, safe to pass through sql() as UNHEX('...')
@@ -46,8 +46,11 @@ cleanup() {
   if [ -n "$PHOTO_ID" ] && [ -n "$OLD_COMMENT" ]; then
     sql "UPDATE File SET comment=$OLD_COMMENT WHERE id=$PHOTO_ID" >/dev/null 2>&1
   fi
+  [ -n "$CARD_FILE" ] && sql "DELETE FROM TagStorage WHERE entity_realm='file' AND entity_id=$CARD_FILE" >/dev/null 2>&1
   [ -n "$TRIGGER_ON" ] && sql "DROP TRIGGER IF EXISTS qp_test_fail" >/dev/null 2>&1
+  [ -n "$REN_TAG" ] && [ -n "$REN_TAG_HEX" ] && sql "UPDATE TagTree SET tag=UNHEX('$REN_TAG_HEX') WHERE id=$REN_TAG" >/dev/null 2>&1
   if [ -n "$BASE_FILE_ID" ]; then
+    sql "DELETE FROM TagStorage WHERE entity_realm='file' AND entity_id > $BASE_FILE_ID" >/dev/null 2>&1
     sql "DELETE FROM FileLink WHERE file_id > $BASE_FILE_ID" >/dev/null 2>&1
     sql "DELETE FROM File WHERE id > $BASE_FILE_ID" >/dev/null 2>&1
   fi
@@ -89,7 +92,9 @@ has "thumbnail url has cache-bust" "$body" '&amp;v='
 has "file input accept" "$body" 'accept="image/*"'
 has "viewport meta on tab" "$body" 'name="viewport"'
 body2="$(get "$BASE?page=rack&tab=default&rack_id=$RACK")"
-hasnt "no viewport meta on default tab" "$body2" 'name="viewport"'
+vp() { printf '%s' "$1" | grep -o '<meta name="viewport"[^>]*>' | wc -l | tr -d ' '; }
+[ "$(vp "$body")" = "1" ] && ok "photos tab has exactly one viewport meta" || bad "photos tab has exactly one viewport meta ($(vp "$body"))"
+[ "$(vp "$body2")" -le 1 ] && ok "default tab has at most one viewport meta (Quick Photo adds none)" || bad "default tab viewport count ($(vp "$body2"))"
 hasnt "no quickphoto root on default tab" "$body2" 'id="quickphoto"'
 
 # escaping
@@ -220,6 +225,129 @@ hasnt "no raw db text" "$out" 'SQLSTATE'
 [ "$(nfiles)" -eq "$n0" ] && ok "rollback leaves no orphan file" || bad "rollback leaves no orphan file"
 sql "DROP TRIGGER IF EXISTS qp_test_fail" >/dev/null; TRIGGER_ON=""
 
+# ---------------------------------------------------------------- tags on Add
+w0="$(warn_count)"
+# data-tags JSON of the Add form, unescaped, as compact "id:name:color" lines
+tags_of() { printf '%s' "$1" | python3 -c '
+import sys, re, html, json
+m = re.search(r"<form class=\"qp-add\"[^>]*? data-tags=\"([^\"]*)\"", sys.stdin.read())
+if not m:
+    print("NOATTR"); sys.exit()
+for t in json.loads(html.unescape(m.group(1))):
+    print("%s:%s:%s" % (t["id"], t["name"], t["color"]))
+'; }
+tag_id() { sql "SELECT id FROM TagTree WHERE tag='$1'" | tr -d '\r\n'; }
+file_tags() { sql "SELECT COALESCE(GROUP_CONCAT(tag_id ORDER BY tag_id),'') FROM TagStorage WHERE entity_realm='file' AND entity_id=$1" | tr -d '\r\n'; }
+last_file() { sql "SELECT COALESCE(MAX(id),0) FROM File" | tr -d '\r\n'; }
+
+page="$(tab_page "$RACK")"
+TOK="$(token_of "$page")"
+tl="$(tags_of "$page")"
+[ "$tl" != "NOATTR" ] && [ -n "$tl" ] && ok "tab has data-tags JSON" || bad "tab has data-tags JSON ($tl)"
+hasnt "non-assignable tag Sites not offered" "$tl" ':Sites:'
+has   "assignable tag Production offered" "$tl" ':Production:'
+has   "child tag North Campus offered" "$tl" ':North Campus:'
+has   "tag colour as #rrggbb" "$tl" ':North Campus:#bfd7ff'
+want="$(sql "SELECT t.id FROM TagTree t LEFT JOIN (SELECT tag_id, COUNT(*) c FROM TagStorage WHERE entity_realm='file' GROUP BY tag_id) u ON u.tag_id=t.id WHERE t.is_assignable='yes' ORDER BY COALESCE(u.c,0) DESC, t.tag" | tr -d '\r' | paste -sd, -)"
+got="$(printf '%s\n' "$tl" | cut -d: -f1 | paste -sd, -)"
+[ "$want" = "$got" ] && ok "tags ordered by usage desc then name ($got)" || bad "tag order ($got vs $want)"
+has "form data-tags attribute is on form.qp-add" "$(printf '%s' "$page" | grep -o '<form class="qp-add"[^>]*>')" ' data-tags="'
+
+T_PROD="$(tag_id Production)"; T_NET="$(tag_id Network)"; T_SITES="$(tag_id Sites)"
+n0="$(nfiles)"
+out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-two" --form-string "taglist[]=$T_PROD" --form-string "taglist[]=$T_NET" --form-string "taglist[]=$T_PROD")"
+has "add with two tags succeeds" "$out" 'Photo added'
+TF="$(sql "SELECT id FROM File WHERE name='qp-tags-two.jpg'" | tr -d '\r\n')"
+[ "$(nfiles)" -eq $((n0+1)) ] && [ -n "$TF" ] && ok "tagged add created one file" || bad "tagged add created one file"
+want="$(printf '%s\n%s\n' "$T_PROD" "$T_NET" | sort -n | paste -sd, -)"
+[ "$(file_tags "$TF")" = "$want" ] && ok "file has exactly the two chosen tags" || bad "file tags ($(file_tags "$TF") vs $want)"
+[ "$(sql "SELECT COUNT(*) FROM TagStorage WHERE entity_realm='file' AND entity_id=$TF" | tr -d '\r\n')" = "2" ] && ok "duplicate id stored once" || bad "duplicate id stored once"
+
+n0="$(nfiles)"; ts0="$(sql "SELECT COUNT(*) FROM TagStorage" | tr -d '\r\n')"
+out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-none")"
+has "add without tags succeeds" "$out" 'Photo added'
+NF="$(sql "SELECT id FROM File WHERE name='qp-tags-none.jpg'" | tr -d '\r\n')"
+[ -n "$NF" ] && [ "$(file_tags "$NF")" = "" ] && ok "add without tags stores no tags" || bad "add without tags stores no tags"
+[ "$(sql "SELECT COUNT(*) FROM TagStorage" | tr -d '\r\n')" = "$ts0" ] && ok "TagStorage unchanged without tags" || bad "TagStorage unchanged without tags"
+
+for spec in "non-assignable:$T_SITES" "non-existent:999999" "zero:0" "negative:-3" "text:abc" "empty:" "valid plus bad:$T_PROD&taglist[]=999999"; do
+  lbl="${spec%%:*}"; val="${spec#*:}"
+  n0="$(nfiles)"; ts0="$(sql "SELECT COUNT(*) FROM TagStorage" | tr -d '\r\n')"
+  if [ "$lbl" = "valid plus bad" ]; then
+    out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-bad" --form-string "taglist[]=$T_PROD" --form-string "taglist[]=999999")"
+  else
+    out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-bad" --form-string "taglist[]=$val")"
+  fi
+  has "$lbl tag id shows error" "$out" 'tags are not valid'
+  [ "$(nfiles)" -eq "$n0" ] && [ "$(sql "SELECT COUNT(*) FROM TagStorage" | tr -d '\r\n')" = "$ts0" ] && ok "$lbl tag id saves nothing" || bad "$lbl tag id saves nothing"
+done
+n0="$(nfiles)"
+out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-bad" --form-string "taglist=$T_PROD")"
+has "scalar taglist shows error" "$out" 'tags are not valid'
+[ "$(nfiles)" -eq "$n0" ] && ok "scalar taglist saves nothing" || bad "scalar taglist saves nothing"
+
+# a failing tag insert rolls back file and link as well
+TRIGGER_ON=1
+sql "CREATE TRIGGER qp_test_fail BEFORE INSERT ON TagStorage FOR EACH ROW SET NEW.entity_id = IF(NEW.entity_realm='file', NULL, NEW.entity_id)" >/dev/null
+n0="$(nfiles)"; fl0="$(sql "SELECT COUNT(*) FROM FileLink" | tr -d '\r\n')"
+out="$(add_photo "$RACK" "$FX/small.jpg" "$TOK" "" --form-string "name=qp-tags-rollback" --form-string "taglist[]=$T_PROD")"
+has "failed tag insert shows error" "$out" 'could not be saved'
+[ "$(nfiles)" -eq "$n0" ] && [ "$(sql "SELECT COUNT(*) FROM FileLink" | tr -d '\r\n')" = "$fl0" ] && ok "tag failure rolls back file and link" || bad "tag failure rolls back file and link"
+sql "DROP TRIGGER IF EXISTS qp_test_fail" >/dev/null; TRIGGER_ON=""
+
+# tag name with HTML is escaped in data-tags
+REN_TAG="$T_PROD"; REN_TAG_HEX="$(hexs Production)"
+XSS_TAG='<img src=z onerror=alert(3)> "q" & '"$(printf '\xc5\x99')"
+sql "UPDATE TagTree SET tag=UNHEX('$(hexs "$XSS_TAG")') WHERE id=$T_PROD" >/dev/null
+page="$(tab_page "$RACK")"
+hasnt "tag name not raw on tab" "$page" '<img src=z'
+has   "tag name escaped in data-tags" "$page" '&lt;img src=z onerror=alert(3)&gt;'
+has   "tag name round-trips through JSON" "$(tags_of "$page")" "$T_PROD:$XSS_TAG:"
+sql "UPDATE TagTree SET tag=UNHEX('$REN_TAG_HEX') WHERE id=$T_PROD" >/dev/null; REN_TAG=""
+[ "$(sql "SELECT tag FROM TagTree WHERE id=$T_PROD" | tr -d '\r\n')" = "Production" ] && ok "tag name restored" || bad "tag name restored"
+w1="$(warn_count)"
+[ "$w1" -eq "$w0" ] && ok "no PHP warnings in web log (tags)" || bad "no PHP warnings in web log (tags) ($w0 -> $w1)"
+
+# ---------------------------------------------------------------- tags on photo cards
+w0="$(warn_count)"
+CARD_FILE="$PHOTO_ID"
+sql "DELETE FROM TagStorage WHERE entity_realm='file' AND entity_id=$CARD_FILE" >/dev/null
+cardtags() { printf '%s' "$1" | python3 -c '
+import sys, re, html
+t = sys.stdin.read()
+for m in re.finditer(r"<div class=\"qp-photo\">.*?(?=<div class=\"qp-photo\">|\Z)", t, re.S):
+    c = m.group(0)
+    if "file_id=%s&" % sys.argv[1] not in c and "file_id=%s\"" % sys.argv[1] not in c:
+        continue
+    row = re.search(r"<div class=\"qp-card-tags\">(.*?)</div>", c, re.S)
+    print("NOROW" if not row else "|".join(html.unescape(x) for x in re.findall(r"<span class=\"qp-card-tag[^>]*>(.*?)</span>", row.group(1))))
+    break
+' "$2"; }
+body="$(tab_page "$RACK")"
+[ "$(cardtags "$body" "$CARD_FILE")" = "NOROW" ] && ok "photo without tags has no tag row" || bad "photo without tags has no tag row ($(cardtags "$body" "$CARD_FILE"))"
+T_NC="$(tag_id 'North Campus')"; T_PROD="$(tag_id Production)"
+sql "INSERT INTO TagStorage (entity_realm, entity_id, tag_id) VALUES ('file', $CARD_FILE, $T_NC)" >/dev/null
+body="$(tab_page "$RACK")"
+[ "$(cardtags "$body" "$CARD_FILE")" = "North Campus" ] && ok "card shows its explicit tag only (parent Sites not shown)" || bad "card explicit tag ($(cardtags "$body" "$CARD_FILE"))"
+has "coloured tag chip has colour variable" "$body" 'qp-card-tag qp-card-tag-colored" style="--qp-tag: #bfd7ff">North Campus</span>'
+hasnt "implicit parent tag not shown on cards" "$body" '>Sites</span>'
+sql "INSERT INTO TagStorage (entity_realm, entity_id, tag_id) VALUES ('file', $CARD_FILE, $T_PROD)" >/dev/null
+body="$(tab_page "$RACK")"
+[ "$(cardtags "$body" "$CARD_FILE")" = "North Campus|Production" ] && ok "two tags sorted by name" || bad "two tags ($(cardtags "$body" "$CARD_FILE"))"
+REN_TAG="$T_PROD"; REN_TAG_HEX="$(hexs Production)"
+XSS_TAG2='<img src=z onerror=alert(4)> "q" & '"$(printf '\xc5\x99')"
+sql "UPDATE TagTree SET tag=UNHEX('$(hexs "$XSS_TAG2")') WHERE id=$T_PROD" >/dev/null
+body="$(tab_page "$RACK")"
+hasnt "card tag name not raw" "$body" '<img src=z onerror=alert(4)'
+has   "card tag name escaped" "$body" '&lt;img src=z onerror=alert(4)&gt;'
+has   "card tag name round-trips" "$(cardtags "$body" "$CARD_FILE")" "$XSS_TAG2"
+sql "UPDATE TagTree SET tag=UNHEX('$REN_TAG_HEX') WHERE id=$T_PROD" >/dev/null; REN_TAG=""
+sql "DELETE FROM TagStorage WHERE entity_realm='file' AND entity_id=$CARD_FILE" >/dev/null; CARD_FILE=""
+body="$(tab_page "$RACK")"
+[ "$(cardtags "$body" "$PHOTO_ID")" = "NOROW" ] && ok "tag row gone after untagging" || bad "tag row gone after untagging"
+w1="$(warn_count)"
+[ "$w1" -eq "$w0" ] && ok "no PHP warnings in web log (card tags)" || bad "no PHP warnings in web log (card tags) ($w0 -> $w1)"
+
 # ---------------------------------------------------------------- op replacePhoto
 w0="$(warn_count)"
 RACK3="$(oid A-03 1560)"; RACK4="$(oid A-04 1560)"
@@ -293,8 +421,10 @@ hasnt "no raw db text on rejects" "$out" 'SQLSTATE'
 [ "$(row_of "$PNG")" = "$before" ] && ok "png unchanged after rejected requests" || bad "png unchanged after rejected requests"
 
 # admin replaces the PNG
-out="$(replace_photo get "$RACK3" "$PNG" "$TOK3" "$MT" "$SZ" "$LK" "$FX/small.jpg")"
+tags_before="$(file_tags "$PNG")"
+out="$(replace_photo get "$RACK3" "$PNG" "$TOK3" "$MT" "$SZ" "$LK" "$FX/small.jpg" --form-string "taglist[]=$T_PROD")"
 has "replace success message" "$out" 'Photo replaced'
+[ "$(file_tags "$PNG")" = "$tags_before" ] && ok "replacePhoto ignores taglist[] (TagStorage unchanged)" || bad "replacePhoto ignores taglist[]"
 after="$(row_of "$PNG")"
 IFS='|' read -r amd5 atype aname asize amtime athumb <<<"$after"
 [ "$amd5" = "$(md5q "$FX/small.jpg")" ] && ok "contents replaced" || bad "contents replaced"

@@ -168,7 +168,22 @@
 		setBusy(false);
 	}
 
-	function upload(form, result, comment, name) {
+	// Tag list rendered by the server in data-tags: [{id, name, color}]. Anything
+	// malformed is ignored (no Tags block).
+	function readTags(form) {
+		var list;
+		try {
+			list = JSON.parse(form.getAttribute('data-tags') || '[]');
+		} catch (e) {
+			return [];
+		}
+		if (!Array.isArray(list)) return [];
+		return list.filter(function (t) {
+			return t && typeof t.id === 'number' && t.id > 0 && typeof t.name === 'string';
+		});
+	}
+
+	function upload(form, result, comment, name, tagIds) {
 		var data = new FormData();
 		var hidden = form.querySelectorAll('input[type=hidden]');
 		for (var i = 0; i < hidden.length; i++) {
@@ -176,6 +191,9 @@
 		}
 		if (comment !== null) data.append('comment', comment);
 		if (name !== null) data.append('name', name);
+		if (tagIds) {
+			for (var t = 0; t < tagIds.length; t++) data.append('taglist[]', String(tagIds[t]));
+		}
 		data.append('file', result.blob, 'photo.jpg');
 		return fetch(form.getAttribute('action'), {
 			method: 'POST',
@@ -206,6 +224,7 @@
 
 		var commentInput = null;
 		var nameInput = null;
+		var tagChips = [];
 		if (!isReplace) {
 			var nameLabel = el('label', 'qp-sheet-label', 'Name');
 			nameInput = el('input', 'qp-sheet-name');
@@ -217,6 +236,34 @@
 			nameInput.value = form.getAttribute('data-name-suggestion') || '';
 			nameLabel.appendChild(nameInput);
 			box.appendChild(nameLabel);
+
+			var tags = readTags(form);
+			if (tags.length) {
+				var tagBox = el('div', 'qp-tags');
+				tagBox.setAttribute('role', 'group');
+				tagBox.setAttribute('aria-labelledby', 'qp-tags-label');
+				var tagLabel = el('div', 'qp-tags-label', 'Tags');
+				tagLabel.id = 'qp-tags-label';
+				tagBox.appendChild(tagLabel);
+				var chipRow = el('div', 'qp-tag-list');
+				tags.forEach(function (t) {
+					var chip = el('button', 'qp-tag', t.name);
+					chip.type = 'button';
+					chip.setAttribute('aria-pressed', 'false');
+					if (typeof t.color === 'string' && /^#[0-9a-f]{6}$/i.test(t.color)) {
+						chip.style.setProperty('--qp-tag', t.color);
+						chip.classList.add('qp-tag-colored');
+					}
+					chip.addEventListener('click', function () {
+						chip.setAttribute('aria-pressed', chip.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+					});
+					chip.qpTagId = t.id;
+					tagChips.push(chip);
+					chipRow.appendChild(chip);
+				});
+				tagBox.appendChild(chipRow);
+				box.appendChild(tagBox);
+			}
 
 			commentInput = el('input', 'qp-sheet-comment');
 			commentInput.type = 'text';
@@ -256,7 +303,10 @@
 				save.disabled = false;
 				cancel.disabled = false;
 			}
-			upload(form, result, commentInput ? commentInput.value : null, nameInput ? nameInput.value : null).then(function (r) {
+			var tagIds = tagChips.filter(function (c) {
+				return c.getAttribute('aria-pressed') === 'true';
+			}).map(function (c) { return c.qpTagId; });
+			upload(form, result, commentInput ? commentInput.value : null, nameInput ? nameInput.value : null, tagIds).then(function (r) {
 				if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) {
 					location.reload();
 				} else if (r.status === 401) {

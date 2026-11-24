@@ -194,6 +194,45 @@ function qp_name_suggestion(string $label, int $timestamp): string
     return $label . '_' . date('Y-m-d', $timestamp);
 }
 
+// Tag colour (TagTree.color, mediumint unsigned or NULL) as "#rrggbb", or null.
+function qp_tag_color($value): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (is_string($value)) {
+        if (!ctype_digit($value) || strlen($value) > 10) {
+            return null;
+        }
+        $value = (int) $value;
+    }
+    if (!is_int($value) || $value < 0 || $value > 0xFFFFFF) {
+        return null;
+    }
+    return '#' . str_pad(dechex($value), 6, '0', STR_PAD_LEFT);
+}
+
+// Posted "taglist" value -> list of unique positive tag ids (first occurrence
+// order), or null when it is not an array of plain positive integers.
+// Missing (null) means no tags.
+function qp_parse_tag_ids($raw): ?array
+{
+    if ($raw === null) {
+        return [];
+    }
+    if (!is_array($raw)) {
+        return null;
+    }
+    $ids = [];
+    foreach ($raw as $v) {
+        if (!is_string($v) || !ctype_digit($v) || strlen($v) > 10 || (int) $v < 1) {
+            return null;
+        }
+        $ids[(int) $v] = true;
+    }
+    return array_keys($ids);
+}
+
 function qp_link_fingerprint(array $links): string
 {
     $parts = [];
