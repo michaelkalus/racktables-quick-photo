@@ -13,6 +13,12 @@ The browser shrinks the picture before upload, so a 12 MP HEIC from an iPhone be
 (at most 4032 px on the longer side, about 2-4 MB). No RackTables core file is modified, and
 the plugin has no database tables and no config variables.
 
+## Screenshot
+
+Photos tab of a rack on a phone (demo instance with generated data, Redesign Theme):
+
+<img src="screenshots/mobile-photos-tab.png" width="300" alt="Photos tab on a phone">
+
 ## Prerequisites
 
 - RackTables **0.22.0** (tested). It uses the plugin architecture of 0.22.
